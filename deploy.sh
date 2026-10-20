@@ -56,7 +56,7 @@ fi
 echo "[3/6] uploading files ..."
 sed "s/SERVER_IP/$SRV/; s/SERVER_PORT/$PORT/" "$HERE/files/asr_boot.sh" > /tmp/asr_boot.sh.$$
 # stop services BEFORE overwriting the binary, or the running process locks it
-$SSH "slay -f -Q io-asr-bb10 2>/dev/null; slay -f -Q io-asr-patched-final 2>/dev/null; sleep 2"
+$SSH "slay -f -Q io-asr-bb10 2>/dev/null; slay -f -Q io-asr-patched-final 2>/dev/null; mkdir -p /var/rootdata; sleep 2"
 $SSH 'cat > /var/rootdata/io-asr-patched-final' < /tmp/io-asr-patched-final.$$
 $SSH 'chmod 755 /var/rootdata/io-asr-patched-final'
 $SSH 'cat > /var/rootdata/asr.cfg'             < /tmp/asr.cfg.$$
