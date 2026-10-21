@@ -49,6 +49,28 @@ _FAKE_TRANSCRIPT = None
 _WHISPER_MODEL = None
 # Last language whisper detected: {"lang": "bg", "prob": 0.93, "ts": ...}
 _WHISPER_INFO = {"lang": None, "prob": 0.0, "ts": 0.0}
+# Contact names for whisper prompt bias (contacts.txt, one per line)
+_CONTACTS = {"mtime": 0.0, "names": []}
+_CONTACTS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              "contacts.txt")
+
+
+def contact_names():
+    """Names from contacts.txt (auto-filled by NVC contact sync too)."""
+    try:
+        mt = os.path.getmtime(_CONTACTS_FILE)
+    except OSError:
+        return []
+    if mt != _CONTACTS["mtime"]:
+        try:
+            with open(_CONTACTS_FILE, encoding="utf-8") as f:
+                names = [ln.strip() for ln in f if ln.strip()]
+            _CONTACTS["names"] = names[:60]  # keep the prompt small
+            _CONTACTS["mtime"] = mt
+            print(f"[whisper] contacts bias: {len(_CONTACTS['names'])} names")
+        except Exception:
+            pass
+    return _CONTACTS["names"]
 
 
 def transcribe(pcm: bytes, language: str) -> str:
@@ -84,6 +106,9 @@ def transcribe(pcm: bytes, language: str) -> str:
         "Команди на асистент: сложи аларма, обади се на, изпрати съобщение, "
         "напомни ми, запази, откажи, да, не, колко е часът, какво е времето, "
         "пусни браузъра, пусни музика.")
+    names = contact_names()
+    if names and not os.environ.get("BB10_WHISPER_PROMPT"):
+        prompt += " Контакти: " + ", ".join(names) + "."
     beam = int(os.environ.get("BB10_WHISPER_BEAM", "5"))
 
     def _run(_lang, _prompt):
@@ -173,6 +198,65 @@ def build_nlsml(transcript: str) -> str:
             '</interpretation></result>')
 
 
+def extract_contact_names(parts):
+    """Pull display names out of a Nuance contact-sync upload.
+
+    Format unknown until we see a real one — try JSON first, then vCard
+    FN:/N: fields. Returns a list of "First Last" strings."""
+    names = []
+    for _nm, content in parts:
+        text = content.decode("utf-8", "replace")
+        try:
+            data = json.loads(text)
+        except Exception:
+            data = None
+        if data is not None:
+            items = data if isinstance(data, list) else \
+                data.get("contacts") or data.get("items") or []
+            for c in items:
+                if not isinstance(c, dict):
+                    continue
+                disp = (c.get("displayName") or c.get("name") or "").strip()
+                if not disp:
+                    disp = " ".join(x for x in (c.get("firstName", ""),
+                                                c.get("lastName", ""))
+                                    if x).strip()
+                if disp:
+                    names.append(disp)
+            continue
+        # vCard fallback
+        for m in re.finditer(r"(?im)^FN[^:]*:(.*)$", text):
+            v = m.group(1).strip().replace("\\;", ";").replace("\\,", ",")
+            if v:
+                names.append(v)
+    # de-dup, keep order
+    seen, out = set(), []
+    for n in names:
+        if n.lower() not in seen:
+            seen.add(n.lower())
+            out.append(n)
+    return out
+
+
+def merge_contacts(new_names):
+    """Append new names to contacts.txt (whisper prompt bias source)."""
+    existing = []
+    try:
+        with open(_CONTACTS_FILE, encoding="utf-8") as f:
+            existing = [ln.strip() for ln in f if ln.strip()]
+    except OSError:
+        pass
+    have = {n.lower() for n in existing}
+    added = [n for n in new_names if n.lower() not in have]
+    if not added:
+        return
+    with open(_CONTACTS_FILE, "a", encoding="utf-8") as f:
+        if existing:
+            f.write("\n")
+        f.write("\n".join(added))
+    print(f"[contacts] +{len(added)} names -> contacts.txt")
+
+
 def dragon_response(transcript: str) -> bytes:
     nlsml = build_nlsml(transcript)
     payload = json.dumps({"nlsml_results": nlsml}, ensure_ascii=False)
@@ -195,6 +279,7 @@ def handle_dragon(body: bytes, content_type: str) -> bytes:
     pcm = bytearray()
     language = ""
     cmd_name = ""
+    upload_parts = []
     for headers, content in parse_multipart(body, boundary):
         disp = disposition_params(headers.get("content-disposition", ""))
         name = disp.get("name", "")
@@ -208,8 +293,25 @@ def handle_dragon(body: bytes, content_type: str) -> bytes:
         elif disp.get("paramname") == "AUDIO_INFO" or name == \
                 "ConcludingAudioParameter":
             pcm += content
+        elif name and name != "RequestData":
+            upload_parts.append((name, content))
     if cmd_name == "NVC_DATA_UPLOAD_CMD":
-        # Contact sync: accepted and ignored. Personal data - we keep nothing.
+        # Contact sync: keep ONLY display names (first/last) for the
+        # whisper prompt bias. Raw dump for format study, then discard.
+        try:
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            raw = os.path.join(os.path.dirname(_CONTACTS_FILE),
+                               f"contact_upload_{ts}.bin")
+            with open(raw, "wb") as f:
+                for nm, c in upload_parts:
+                    f.write(b"=== " + nm.encode() + b" ===\n" + c + b"\n")
+            names = extract_contact_names(upload_parts)
+            if names:
+                merge_contacts(names)
+            print(f"[dragon] contact sync: {len(upload_parts)} parts, "
+                  f"{len(names)} names extracted")
+        except Exception as e:
+            print(f"[dragon] contact sync parse failed: {e}")
         return dragon_response("")
     print(f"[dragon] {cmd_name or 'ASR'} lang={language} "
           f"pcm={len(pcm)} bytes ({len(pcm)/32000:.1f} s)")
