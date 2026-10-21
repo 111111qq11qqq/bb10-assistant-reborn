@@ -13,7 +13,7 @@ BB10 телефон                         PC (сървър)
 │ Assistant UI (тач)  │              │ server.py (Python, порт 8080)│
 │ io-asr (патчнат)    │── HTTP ────► │  /dragon/NmspServlet/  (ASR) │
 │  Dragon ──► сървър  │              │  /delegate/runPipeline (NLU) │
-│  Maluuba ─► сървър  │              │  faster-whisper (base, int8) │
+│  Maluuba ─► сървър  │              │  faster-whisper (small, int8) │
 └─────────────────────┘              └──────────────────────────────┘
 ```
 
@@ -25,12 +25,15 @@ BB10 телефон                         PC (сървър)
 
 ### Стартиране (Windows, PowerShell)
 ```powershell
-$env:BB10_WHISPER_MODEL='base'   # base = бърз (~6s); small = по-точен за BG (~30s)
+$env:BB10_WHISPER_MODEL='small'  # small = по-точен за BG (текущ, от 21.10 вечерта); base = бърз (~6s)
 $env:BB10_WHISPER_LANG='auto'    # auto = whisper сам познава езика; 'bg' форсира български
 $env:BB10_WHISPER_BEAM='1'
+$env:BB10_WATCHDOG='1'           # автостарт на телефоните след рестарт (§12)
+$env:BB10_WATCHDOG_IPS='192.168.0.140,192.168.0.166,192.168.0.151'
 Start-Process python -ArgumentList '-u','server.py','--port','8080' `
   -WorkingDirectory E:\bb10-assistant-server `
-  -RedirectStandardOutput server_live.log -RedirectStandardError server_live.err
+  -RedirectStandardOutput E:\bb10-assistant-server\server_live.log -RedirectStandardError E:\bb10-assistant-server\server_live.err
+# ВНИМАНИЕ: логовете — само с АБСОЛЮТНИ пътища (§12, капан 3)
 ```
 
 **ВАЖНО**: ползвай Python, в който `faster_whisper` и `numpy` са налични. Проверка: `python -c "import faster_whisper"`. Ако логът каже „no recogniser available“, сървърът връща тишина и телефонът пада в търсене/браузър.
@@ -134,8 +137,8 @@ audio_out -i /var/rootdata/file.wav
 
 | Модел | BG качество | Латентност (3s команда) |
 |---|---|---|
-| base (текущ) | средно; бърка при тих/клипнат запис | ~6 s |
-| small | видимо по-добро | ~20-45 s |
+| base | средно; бърка при тих/клипнат запис | ~6 s |
+| small (текущ, от 21.10 вечерта) | видимо по-добро | ~20-45 s — ако се струва бавно, връщаме base |
 | large-v3-turbo | най-добро | непрактично на този CPU |
 
 Реализирано: имената от контактите се добавят автоматично към whisper prompt-а. Сървърът пази `contacts.txt` (до 60 имена) до server.py; при всяка реплика prompt-ът се допълва с „Контакти: …“. Източници: (1) ръчно редактируем файл; (2) автоматично — телефонът праща контакт-синк (NVC_DATA_UPLOAD_CMD), сървърът вади само display имената (JSON или vCard) и ги добавя в contacts.txt. Суровият sync се пише в contact_upload_<ts>.bin за изучаване. Забележка: след флаш телефоните нямат контакти — файлът се пълни при първия реален sync.
@@ -193,3 +196,17 @@ audio_out -i /var/rootdata/file.wav
 BB10_WATCHDOG=1, BB10_WATCHDOG_IPS=192.168.0.140,192.168.0.166,192.168.0.151 + стандартните BB10_WHISPER_* променливи; логове с абсолютни пътища.
 
 **Тест**: `slay -f -Q io-asr-patched-final` на Q10 → след ≤2 мин watchdog-ът го възстановява сам (`restore done` в лога, pidin показва процеса). Потвърдено.
+
+## 13. portproxy капанът — „асистентът спира бързо и нищо не стига до сървъра" (21.10.2026)
+
+**Симптом**: телефонът слуша, но сесиите изобщо не се появяват в лога на сървъра; `curl http://127.0.0.1:8080` работи, `curl http://192.168.0.157:8080` → connection reset.
+
+**Причина**: старо `netsh interface portproxy` правило `192.168.0.157:8080 → 192.168.0.233:8080` (към хъба). Windows услугата **iphlpsvc** (svchost) държи по-специфичен binding за LAN адреса и **прехваща трафика преди процеса, слушащ на 0.0.0.0:8080** — телефоните попадат на мъртвия proxy target вместо на сървъра. Активирало се е при рестарт на iphlpsvc (~20:30).
+
+**Диагностика**: `netstat -ano | grep :8080` — ако освен `0.0.0.0:8080` има и `192.168.0.157:8080` от друг PID (svchost), това е portproxy. Проверка: `netsh interface portproxy show all`.
+
+**Фикс**: `netsh interface portproxy delete v4tov4 listenaddress=192.168.0.157 listenport=8080` (иска admin). Правилата за 2222/2223/5901/8090/8091 и Tailscale (100.x) са за други услуги — НЕ се пипат.
+
+**Допълнително**: добавено е firewall правило „BB10 Assistant Server 8080" (Inbound Allow TCP 8080, Private profile), защото allow-правилата за python.exe са per-path и не покриват `.venv\Scripts\python.exe` на сървъра.
+
+**Урок за таблицата в §7**: „асистентът спира веднага / сървърът мълчи" → първо `netstat` за дублиран listener на 8080, после portproxy, после firewall.
