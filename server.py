@@ -1196,6 +1196,77 @@ def dragon_response_parse(body, ctype):
     return handle_dragon(body, ctype)
 
 
+# ---------------------------------------------------------------------------
+# Watchdog: keep the patched io-asr alive across phone reboots
+# ---------------------------------------------------------------------------
+
+_SSH_EXE = None
+
+
+def _ssh_exe():
+    global _SSH_EXE
+    if _SSH_EXE is None:
+        import shutil
+        _SSH_EXE = (shutil.which("ssh")
+                    or r"C:\Program Files\Git\usr\bin\ssh.exe")
+    return _SSH_EXE
+
+
+def _ssh_key():
+    return os.path.join(os.path.expanduser("~"), ".ssh", "bb10_root_rsa")
+
+
+def phone_ssh(ip, remote_cmd, timeout=15):
+    """Run a command on a rooted phone. Returns stdout or None on failure."""
+    import subprocess
+    try:
+        r = subprocess.run(
+            [_ssh_exe(), "-i", _ssh_key(), "-o", "StrictHostKeyChecking=no",
+             "-o", "BatchMode=yes", "-o", "HostKeyAlgorithms=+ssh-rsa",
+             "-o", "PubkeyAcceptedAlgorithms=+ssh-rsa", "-o",
+             "IdentitiesOnly=yes", "-o", f"ConnectTimeout={timeout - 5}",
+             f"root@{ip}", remote_cmd],
+            capture_output=True, timeout=timeout, text=True)
+        if r.returncode == 0:
+            return r.stdout
+        print(f"[watchdog] {ip} ssh rc={r.returncode}: "
+              f"{(r.stderr or '').strip()[:200]}")
+    except Exception as e:
+        print(f"[watchdog] {ip} ssh error: {e}")
+    return None
+
+
+def watchdog_loop():
+    """Every ~90 s: if a known phone is reachable but the patched io-asr is
+    NOT running (fresh reboot, crash), re-run its boot restore script."""
+    ips = [x.strip() for x in
+           os.environ.get("BB10_WATCHDOG_IPS", "").split(",") if x.strip()]
+    if not ips:
+        return
+    interval = int(os.environ.get("BB10_WATCHDOG_INTERVAL", "90"))
+    print(f"[watchdog] watching {ips} every {interval}s")
+    time.sleep(30)  # let the server settle first
+    while True:
+        for ip in ips:
+            try:
+                out = phone_ssh(ip, "pidin | grep -c asr-patched || true")
+                if out is None:
+                    continue  # phone off / unreachable — normal
+                n = int(out.strip() or "0")
+                if n == 0:
+                    print(f"[watchdog] {ip}: patched io-asr missing "
+                          f"-> running asr_boot.sh")
+                    # /var/rootdata is noexec on BB10: pipe via stdin
+                    r = phone_ssh(ip, "cat /var/rootdata/asr_boot.sh | sh",
+                                  timeout=40)
+                    if r is not None:
+                        print(f"[watchdog] {ip}: restore done")
+                    time.sleep(5)
+            except Exception as e:
+                print(f"[watchdog] {ip} check failed: {e}")
+        time.sleep(interval)
+
+
 def main():
     global _FAKE_TRANSCRIPT
     ap = argparse.ArgumentParser(description="BB10 Assistant reference server")
@@ -1235,6 +1306,10 @@ def main():
               "(rules as fallback)")
     else:
         print("  NLU: rule-based only (set --llm-url/--llm-model for LLM)")
+    if os.environ.get("BB10_WATCHDOG", "").strip() in ("1", "true", "yes"):
+        import threading
+        t = threading.Thread(target=watchdog_loop, daemon=True)
+        t.start()
     httpd.serve_forever()
 
 
