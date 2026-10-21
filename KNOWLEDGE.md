@@ -172,3 +172,24 @@ audio_out -i /var/rootdata/file.wav
 - `/wa/q?input=<въпрос>` → queryresult XML: 2 пода (картичка 684px + 1px spacer — задължителни два, иначе „No pods found"), BG без `spokenresult`, EN с `spokenresult` (първите 2 изречения)
 - `/wa/img/<id>.png` → генерираната картичка (PIL, DejaVuSans — пълна кирилица); `/wa/img/spacer.png` → 1×1 прозрачен
 - Plugin-ът чака до 30 s за отговор — Wikipedia отговаря за 1-3 s
+
+## 12. Watchdog — автостарт след рестарт на телефона (доказано на живо)
+
+**Проблем**: patched `io-asr` не оцелява след рестарт — телефонът буутва със стоковия ASR и асистентът „не слуша". On-device boot hook на BB10 изисква rcfs/headless-bar (твърде дълбоко), затова persistence-ът е от страна на PC-то, което е винаги включено.
+
+**Механика** (thread в server.py, пуска се с `BB10_WATCHDOG=1`):
+- На всеки 90 s (`BB10_WATCHDOG_INTERVAL`) по root ssh към всяко IP от `BB10_WATCHDOG_IPS` (запетайки): `pidin | grep -c asr-patched || true`
+- 0 → телефонът е жив, но patched ASR липсва → `cat /var/rootdata/asr_boot.sh | sh` → „restore done"
+- ssh грешка/timeout → телефонът е изключен — пропуска се мълчаливо, следващ цикъл пак проверява
+
+**Три капана, открити на живо (21.10.2026)**:
+1. `grep -c` връща exit code 1 при 0 съвпадения → без `|| true` ssh командата „гърми" и watchdog-ът мълчи.
+2. `/var/rootdata` е **noexec** на BB10 — дори `sh /var/rootdata/asr_boot.sh` дава „Operation not permitted" (chmod 755 не помага). Решение: `cat ... | sh` през stdin.
+3. PowerShell `Start-Process -RedirectStandardOutput` с относителен път пише лога в **cwd на PowerShell сесията**, не в WorkingDirectory на детето — винаги абсолютни пътища за логовете.
+
+**asr_boot.sh** е на всяко устройство от deploy.sh: прави `ln -sPf` prompts overlay, slay на стоковия io-asr, стартира patched бинарника, PPS настройка на MaluubaHost.
+
+**Старт на сървъра с watchdog** (PowerShell, от E:\bb10-assistant-server):
+BB10_WATCHDOG=1, BB10_WATCHDOG_IPS=192.168.0.140,192.168.0.166,192.168.0.151 + стандартните BB10_WHISPER_* променливи; логове с абсолютни пътища.
+
+**Тест**: `slay -f -Q io-asr-patched-final` на Q10 → след ≤2 мин watchdog-ът го възстановява сам (`restore done` в лога, pidin показва процеса). Потвърдено.
