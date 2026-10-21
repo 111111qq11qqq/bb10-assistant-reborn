@@ -122,17 +122,23 @@ def transcribe(pcm: bytes, language: str) -> str:
     text, info = _run(lang, prompt)
     detected = getattr(info, "language", None)
     prob = float(getattr(info, "language_probability", 0.0))
-    # BG-heavy prompt can force Cyrillic output even when the speech is
-    # English ("open browser" -> "Опан браузъра"). If whisper heard a
-    # non-Bulgarian language but wrote Cyrillic, redo with the detected
-    # language forced and an unbiased prompt.
-    if (detected and detected != "bg" and lang is None
-            and re.search(r"[а-яА-Я]", text)):
-        print(f"[whisper] pass2: forcing lang={detected} "
-              f"(cyrillic artifact: {text!r})")
-        text, info = _run(detected, None)
-        detected = getattr(info, "language", detected)
-        prob = float(getattr(info, "language_probability", prob))
+    if lang is None and detected:
+        if detected not in ("bg", "en"):
+            # The user speaks ONLY Bulgarian/English. ru/uk/mk/sr detections
+            # are whisper confusion over BG speech — force Bulgarian.
+            print(f"[whisper] detected {detected} (unsupported) "
+                  f"-> forcing bg (was: {text!r})")
+            text, info = _run("bg", prompt)
+            detected = "bg"
+            prob = float(getattr(info, "language_probability", prob))
+        elif detected == "en" and re.search(r"[а-яА-Я]", text):
+            # BG-heavy prompt can force Cyrillic output even when the
+            # speech is English ("open browser" -> "Опан браузъра").
+            print(f"[whisper] pass2: forcing lang=en "
+                  f"(cyrillic artifact: {text!r})")
+            text, info = _run("en", None)
+            detected = getattr(info, "language", detected)
+            prob = float(getattr(info, "language_probability", prob))
     try:
         _WHISPER_INFO["lang"] = detected
         _WHISPER_INFO["prob"] = prob
