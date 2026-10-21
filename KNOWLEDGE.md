@@ -147,3 +147,27 @@ audio_out -i /var/rootdata/file.wav
 - Текстът на екрана (транскриптът) също е на чутия език.
 - Говорим отговор (TTS): BB10 няма български TTS глас — българският текст си остава само на екрана. Английски отговори телефонът може да изговори, но само през пачнатия Wolfram plugin (`libWolframPlugin.so`, docs/08 в оригиналния protocol repo) — все още НЕ е деплойнат на телефоните.
 - Потвърждения: „да/ок/окей/кей/сейв/съхрани/давай/действай" = yes; „кенсъл/кенсел/кансъл/кансел/откажи" = cancel (фонетични варианти за шепота на whisper).
+
+## 11. Wolfram plugin patch — говорими/текстови отговори (доказано на живо)
+
+**Какво дава**: въпрос („кой е…", „who is…") → картичка с отговор на екрана + TTS глас на английски. На български — само картичка (BB10 няма BG TTS глас), както е по дизайн. Отговорите идват от Wikipedia (bg/en според езика на въпроса), fallback: DuckDuckGo. Докосване на картичката → Google търсене.
+
+**Файл**: `/apps/sys.search.gYABgPp5WMkB_07CE6wzbflslRQ/native/lib/libWolframPlugin.so`
+Стокова версия: 116 272 bytes, cksum **2029093847** (еднаква на Z30-1, Z30-2, Q10). Пачната: cksum **1580988818**.
+
+**Пач (patch_wolfram.py)** — офсети от docs/08 на protocol repo, верифицирани байт по байт:
+| Офсет | Оригинал | Става |
+|---|---|---|
+| 0xe0a1 | `http://www.wolframalpha.com/queryrecognizer/query.jsp` (54B място) | `http://192.168.0.157:8080/wa/recognizer` |
+| 0xde1d | `http://api.wolframalpha.com/v2/query` (37B) | `http://192.168.0.157:8080/wa/q` |
+| 0xb170 | `55 d0` (beq — accept проверка) | `00 bf` (NOP) |
+| 0xb1ec | `7d b1` (cbz — accept проверка) | `00 bf` (NOP) |
+| 0xd8ab | `http://m.wolframalpha.com/input/` (32B) | `https://www.google.com/search` |
+
+**Деплой** (root ssh): backup в /var/rootdata/libWolframPlugin.so.orig → `cat > $LIB/libWolframPlugin.so.tmp` → `chmod 644` → `mv -f tmp → .so` → проверка cksum. Plugin-ът се зарежда при следващо отваряне на асистента (ако върви: убий процеса `app/native/libUniversalSearch.so.1.0.0`).
+
+**Сървърни endpoint-и** (server.py + wa_engine.py):
+- `/wa/recognizer?i=<въпрос>` → queryrecognizer XML, accepted=true
+- `/wa/q?input=<въпрос>` → queryresult XML: 2 пода (картичка 684px + 1px spacer — задължителни два, иначе „No pods found"), BG без `spokenresult`, EN с `spokenresult` (първите 2 изречения)
+- `/wa/img/<id>.png` → генерираната картичка (PIL, DejaVuSans — пълна кирилица); `/wa/img/spacer.png` → 1×1 прозрачен
+- Plugin-ът чака до 30 s за отговор — Wikipedia отговаря за 1-3 s
