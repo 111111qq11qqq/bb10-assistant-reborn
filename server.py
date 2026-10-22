@@ -1040,8 +1040,18 @@ def classify_blank_rules(query, session):
             entities.append(ent("LOCATION", m.group(1).strip()))
         return result("WEATHER", "WEATHER_STATUS", entities)
 
+    # --- Open app by keyword (robust to whisper mangling the verb,
+    #     e.g. "Отвърив браузъра") — skipped for questions ---------------
+    if not re.match(r"^(кой|коя|кое|какво|какви|кога|колко|защо|къде|"
+                    r"who|what|when|how|why|where)\b", t):
+        for bg_word, app in _BG_APPS.items():
+            if bg_word in t:
+                return result("APPLICATION", "APPLICATION",
+                              [ent("APPNAME", app)])
+
     # --- Open app (normally caught locally, harmless fallback) ---------
-    m = re.search(r"(?:apri|open|launch|avvia|пусни|отвори|стартирай|"
+    m = re.search(r"(?:apri|open|launch|avvia|пусни|отвори|отвъри|"
+                  r"отвърив|отваряй|стартирай|"
                   r"старта|старт|опан|оупън|оупен)[\s,.!?]+(.+)$", t)
     if m:
         appname = m.group(1).strip().strip('.,!?').strip()
@@ -1207,8 +1217,17 @@ def _ssh_exe():
     global _SSH_EXE
     if _SSH_EXE is None:
         import shutil
-        _SSH_EXE = (shutil.which("ssh")
-                    or r"C:\Program Files\Git\usr\bin\ssh.exe")
+        # BB10 sshd needs ssh-rsa (SHA1) host keys — only the MSYS/git ssh
+        # still supports them; Windows OpenSSH silently drops the connection.
+        # Prefer the bundled git ssh over PATH (PATH may give System32's).
+        for cand in (r"E:\KimiData\daimon-bundle\runtime\git\usr\bin\ssh.EXE",
+                     r"C:\Program Files\Git\usr\bin\ssh.exe",
+                     shutil.which("ssh")):
+            if cand and os.path.exists(cand):
+                _SSH_EXE = cand
+                break
+        else:
+            _SSH_EXE = "ssh"
     return _SSH_EXE
 
 
