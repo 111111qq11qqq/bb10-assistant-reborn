@@ -197,6 +197,10 @@ BB10_WATCHDOG=1, BB10_WATCHDOG_IPS=192.168.0.140,192.168.0.166,192.168.0.151 + �
 
 **Тест**: `slay -f -Q io-asr-patched-final` на Q10 → след ≤2 мин watchdog-ът го възстановява сам (`restore done` в лога, pidin показва процеса). Потвърдено.
 
+**Автостарт с Windows** (от 22.10): задача в Task Scheduler `BB10AssistantServer` (At log on, user Ivo) → `start_server.bat` (до server.py). Идемпотентен: ако 8080 вече слуша, излиза без дублиране. Тествано: kill на сървъра → `schtasks /run` → сървър + watchdog се вдигат сами. Капан 4: под Task Scheduler `shutil.which("ssh")` намира Windows OpenSSH (System32), който **мълчаливо затваря връзката** към BB10 sshd (ssh-rsa/SHA1 host keys вече не се поддържат от Win32-OpenSSH) — затова `_ssh_exe()` винаги предпочита bundled git ssh (`E:\KimiData\daimon-bundle\runtime\git\usr\bin\ssh.EXE`) пред PATH.
+
+**Защо не на QNX хъба**: сървърът зависи от faster-whisper/CTranslate2 (x86, AVX) — няма QNX build, портването е непрактично. Хъбът остава за OTA/knowledge/екрани; ASR сървърът — на Windows PC-то (все пак е винаги включено).
+
 ## 13. portproxy капанът — „асистентът спира бързо и нищо не стига до сървъра" (21.10.2026)
 
 **Симптом**: телефонът слуша, но сесиите изобщо не се появяват в лога на сървъра; `curl http://127.0.0.1:8080` работи, `curl http://192.168.0.157:8080` → connection reset.
